@@ -4,6 +4,95 @@ defmodule Scratch.DinPhil do
   """
 
 
+  defmodule BowlOfRice do
+    @moduledoc """
+    when philosophers try to eat from this bowl, the bowl will give
+    bite_size grains of rice per :eat msg
+    """
+
+    @bite_size 10
+
+    def output({_, o}, msg),
+      do: send(o, {self(), msg})
+
+    def serve_rice({rice_count, o} = bowl_state) do
+      receive do
+        {:doneyet} when rice_count > 0 ->
+          output(bowl_state, "hey there is still rice in the bowl!  we are not doneyet!")
+          serve_rice(bowl_state)
+        {:eat, eating_pid} ->
+          case rice_count do
+            rice_count when rice_count == 0 ->
+              send(eating_pid, :bowl_is_empty)
+              serve_rice({0, o})
+            rice_count when rice_count < @bite_size ->
+              send(eating_pid, rice_count)
+              serve_rice({0, o})
+            rice_count ->
+              send(eating_pid, @bite_size)
+              serve_rice({rice_count - @bite_size, o})
+          end
+      end
+    end
+
+    def start_link({rice_count, outputer}) do
+      bowl = spawn(fn -> serve_rice({rice_count, outputer}) end)
+      {:ok, bowl}
+    end
+  end
+
+
+  #TODO register this process with a Registry name, take out all the manual passing of its pid.
+  defmodule Outputer do
+    @moduledoc """
+    simple process to serialize writing to output
+
+    expects a message to either be
+      {from_pid, msg}
+
+      or
+
+      {:doneyet}
+
+    ## example
+
+      iex> o = Outputer.startup()
+      "2023-01-09T07:04:53.358281Z|<0.148.0>|outputer started."
+      iex> send(o, {self(), "hello is this thing on?"})
+      "2023-01-09T07:05:57.666975Z|<0.148.0>|hello is this thing on?"
+      iex> send(o, {:doneyet})
+      "2023-01-09T07:06:41.575905Z|<0.148.0>|OUTPUT ENDS"
+
+    """
+
+    def startup() do
+      out_pid = spawn(fn -> loop() end)
+    end
+
+    def to_line(msg) do
+      "{DateTime.utc_now |> DateTime.to_iso8601}|#{msg}"
+    end
+    def to_line(from_pid, msg) do
+      "{DateTime.utc_now |> DateTime.to_iso8601}|#{:erlang.pid_to_list(from_pid)}|#{msg}"
+    end
+
+    def doneyet() do
+      send(self(), "OUTPUT ENDS")
+    end
+
+    def loop() do
+      send(self(), "outputer started.")
+
+      receive do
+        {:doneyet} -> doneyet()
+        {from_pid, msg} -> IO.puts(to_line(from_pid, msg))
+        msg when is_binary(msg) -> IO.puts(to_line(msg))
+        x -> IO.puts(to_line(IO.inspect(x)))
+      end
+
+      loop()
+    end
+  end
 
 
   defmodule Chopstick do
@@ -39,7 +128,6 @@ defmodule Scratch.DinPhil do
 
         iex process has released chopstick
     """
-alias Scratch.DinPhil.Chopstick
 
     @type t :: %__MODULE__{
       outputer: pid(),
@@ -47,27 +135,44 @@ alias Scratch.DinPhil.Chopstick
     defstruct [outputer: nil]
 
     def output(%Chopstick{outputer: o}, msg) do
-      send(o, "chopstick #{self()}: #{msg}")
+      send(o, {self(), "chopstick #{self()}: #{msg}"})
     end
 
-    def init(outputer) do
+    def startup(outputer) do
       c_pid = spawn(
         fn ->
-          available(%Chopstick{
+          post_startup(%Chopstick{
             outputer: outputer,
           })
         end)
       c_pid
     end
 
-    def available(%Chopstick{} = c) do
-
+    def post_startup(%Chopstick{} = c) do
+      output(c, "started up.")
+      not_acquired(c)
     end
 
-  end
+    def not_acquired(%Chopstick{} = c) do
+      output(c, "ready to be acquired by some lucky philosopher")
+      receive do
+        {:acquire, acquired_by_pid} ->
+          send(acquired_by_pid, {:chopstick_acquired, self()})
+          output(c, "acquired by #{acquired_by_pid}")
+          acquired(c, acquired_by_pid)
+      end
+    end
 
-
-
+    def acquired(c, acquired_by_pid) do
+      output(c, "is now acquired by #{acquired_by_pid}")
+      receive do
+        {:release, ^acquired_by_pid} ->
+          send(acquired_by_pid, {:chopstick_released, self()})
+          output(c, "is now released by #{acquired_by_pid}")
+          not_acquired(c)
+      end
+    end
+  end #module Chopstick
 
 
   defmodule Philosopher do
@@ -97,7 +202,7 @@ alias Scratch.DinPhil.Chopstick
 
     @eat_delay_sec 2
 
-    def output(%Philosopher{id: id, outputer: o}, msg), do: send(o, "philosopher '#{id}': #{msg}.")
+    def output(%Philosopher{id: id, outputer: o}, msg), do: send(o, {self(), "philosopher '#{id}': #{msg}."})
 
     def release_chopsticks(%Philosopher{
       left_chopstick: l,
@@ -117,7 +222,7 @@ alias Scratch.DinPhil.Chopstick
     end
 
     def doneyet(%Philosopher{
-        total_rice_eaten: total_rice_eaten,} = p) do
+        total_rice_eaten: total_rice_eaten} = p) do
 
       release_chopsticks(p)
       output(p,
@@ -186,7 +291,7 @@ alias Scratch.DinPhil.Chopstick
       end
     end
 
-    def init(id, l, r, bowl, o) do
+    def startup(id, l, r, bowl, o) do
       phil_pid = spawn(
         fn -> think(%Philosopher{
           id: id,
@@ -196,6 +301,7 @@ alias Scratch.DinPhil.Chopstick
           bowl_of_rice: bowl,
           outputer: o,
         }) end)
+      phil_pid
     end
 
   end #module Scratch.DinPhil.Philosopher
